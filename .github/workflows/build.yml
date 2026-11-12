@@ -68,12 +68,45 @@ jobs:
           ) | Set-Content -Path upstream/build.user.bat -Encoding ascii
           Write-Host "Using SDK $sdk"
 
+      # In the previous run LAV's genversion.cmd returned 255, aborting
+      # DSUtilLite.vcxproj. This bypasses only Git-derived *version stamping*.
+      # It does NOT disable audio decoding or alter the spatial patch.
+      - name: Fix LAV version stamping for CI (build number 0)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lav = 'upstream/src/thirdparty/LAVFilters'
+          $directory = Join-Path $lav 'src/common/includes'
+          if (-not (Test-Path $directory)) {
+            throw "LAV common/includes directory missing: $directory"
+          }
+          $header = Join-Path $directory 'version_rev.h'
+          Set-Content -LiteralPath $header -Encoding ascii -Value '#define LAV_VERSION_BUILD 0'
+          # The original version script returned code 255 in the uploaded
+          # build logs; its exact cause is not present in those logs.
+          @'
+          @echo off
+          setlocal
+          set "REVHEADER=%~dp0src\common\includes\version_rev.h"
+          if not exist "%~dp0src\common\includes" exit /b 2
+          > "%REVHEADER%" echo #define LAV_VERSION_BUILD 0
+          endlocal
+          exit /b 0
+          '@ | Set-Content -LiteralPath (Join-Path $lav 'genversion.cmd') -Encoding ascii
+          & cmd.exe /d /c (Join-Path $lav 'genversion.cmd')
+          if ($LASTEXITCODE -ne 0) { throw "LAV version stub failed: $LASTEXITCODE" }
+          Write-Host "LAV version stamping stabilized. Header: $header"
+
       - name: Build complete x64 player, including LAV Filters
         shell: cmd
         working-directory: upstream
         run: |
-          call build.bat build x64 release main
-          if errorlevel 1 exit /b 1
+          if not exist bin\logs mkdir bin\logs
+          call build.bat build x64 release main > bin\logs\spatial51_full_console.log 2>&1
+          set "BUILD_EXIT=%ERRORLEVEL%"
+          echo ==== Last 140 lines of full build output ====
+          powershell -NoProfile -Command "Get-Content bin/logs/spatial51_full_console.log -Tail 140"
+          if not "%BUILD_EXIT%"=="0" exit /b %BUILD_EXIT%
 
       - name: Publish compiled MPC-HC (when successful)
         if: success()
