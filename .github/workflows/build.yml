@@ -1,0 +1,96 @@
+name: Build MPC-HC Spatial51 (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Download patch ZIP from this repository
+        uses: actions/checkout@v4
+
+      - name: Get MPC-HC source and submodules
+        shell: pwsh
+        run: |
+          git clone --branch develop --depth 1 https://github.com/clsid2/mpc-hc.git upstream
+          if ($LASTEXITCODE -ne 0) { throw "MPC-HC clone failed" }
+          git -C upstream submodule update --init --recursive --depth 1
+          if ($LASTEXITCODE -ne 0) { throw "MPC-HC submodule checkout failed" }
+
+      - name: Apply experimental Spatial51 source patch
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "MPCSpatial51Patch.zip")) {
+            throw "Upload MPCSpatial51Patch.zip at the root of this repository first."
+          }
+          Expand-Archive -Path MPCSpatial51Patch.zip -DestinationPath patch -Force
+          python patch/MPCSpatial51Patch/apply_patch.py upstream --dry-run
+          if ($LASTEXITCODE -ne 0) { throw "Patch does not match current upstream source" }
+          python patch/MPCSpatial51Patch/apply_patch.py upstream
+          if ($LASTEXITCODE -ne 0) { throw "Patch failed" }
+
+      - name: Install NASM assembly tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip'
+          Invoke-WebRequest -Uri $url -OutFile nasm.zip
+          Expand-Archive -Path nasm.zip -DestinationPath tools/nasm -Force
+          $nasm = Get-ChildItem -Path tools/nasm -Recurse -Filter nasm.exe | Select-Object -First 1
+          if (-not $nasm) { throw 'NASM not found after extracting release ZIP' }
+          Add-Content -Path $env:GITHUB_PATH -Value $nasm.DirectoryName
+          & $nasm.FullName -v
+
+      - name: Configure Windows SDK and VS 2022
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise'
+          if (-not (Test-Path "$vs\Common7\Tools\VsDevCmd.bat")) {
+            throw 'GitHub Windows runner is missing Visual Studio 2022 Enterprise'
+          }
+          $sdkDir = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          $sdk = Get-ChildItem $sdkDir -Directory |
+            Where-Object { $_.Name -match '^10\.0\.\d+\.0$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+          if (-not $sdk) { throw 'No Windows 10/11 SDK found on runner' }
+          @(
+            '@echo off',
+            "set `"MPCHC_VS_PATH=$vs`"",
+            "set `"MPCHC_WINSDK_VER=$sdk`""
+          ) | Set-Content -Path upstream/build.user.bat -Encoding ascii
+          Write-Host "Using SDK $sdk"
+
+      - name: Build complete x64 player, including LAV Filters
+        shell: cmd
+        working-directory: upstream
+        run: |
+          call build.bat build x64 release main
+          if errorlevel 1 exit /b 1
+
+      - name: Publish compiled MPC-HC (when successful)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPC-HC-Spatial51-experimental-x64
+          path: upstream/bin/mpc-hc_x64/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish build error logs (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPC-HC-Spatial51-build-logs
+          path: |
+            upstream/bin/logs/
+            upstream/src/thirdparty/LAVFilters/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
